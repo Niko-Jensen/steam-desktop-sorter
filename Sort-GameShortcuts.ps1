@@ -256,8 +256,9 @@ if ($WhatIf) {
         $allMoves | Export-Csv -Path $LogFile -NoTypeInformation -Encoding UTF8
     }
     Save-Cache
+    $destLabel = if ($TargetDir) { $TargetDir } else { $GamesFolderName }
     if ($moved.Count -gt 0) {
-        Write-Host "`nDone! $($moved.Count) game shortcut(s) sorted into '$($TargetDir ? $TargetDir : $GamesFolderName)'. Log updated for -Undo."
+        Write-Host "`nDone! $($moved.Count) game shortcut(s) sorted into '$destLabel'. Log updated for -Undo."
     } else {
         Write-Host "`nEverything already sorted - nothing to move."
     }
