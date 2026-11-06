@@ -12,7 +12,7 @@ Sort into a fixed folder of your choice (created automatically if missing):
 powershell -ExecutionPolicy Bypass -File "Sort-GameShortcuts.ps1" -TargetDir "C:\Users\niko4\OneDrive\Skrivebord\Spilgenveje - Steam"
 ```
 
-Or sort into a `Games` folder on each desktop (default behaviour):
+Or sort into a `Games` folder  that it creates on your desktop (default behaviour):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "Sort-GameShortcuts.ps1"
