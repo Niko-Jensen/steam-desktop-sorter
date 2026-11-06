@@ -1,7 +1,11 @@
 # Sort-GameShortcuts.ps1
 # Sorts game shortcuts (.url / .lnk) from your desktop into a single "Games" folder.
-# Studios that have 2+ games on your desktop get their own subfolder (Games\<Studio>);
+# Studios that have 2+ games get their own subfolder (Games\<Studio>);
 # studios with only one game just sit in the Games root.
+#
+# RE-RUNS ARE SAFE: games already inside the Games folder are taken into account,
+# so a studio folder created earlier is reused, and games previously left in the
+# Games root are promoted into their studio folder once that studio reaches 2+ games.
 #
 # The game's studio/publisher is detected AUTOMATICALLY via the Steam store API,
 # based on the app id found in the shortcut (steam:// or store.steampowered.com links).
@@ -12,7 +16,7 @@
 #   powershell -ExecutionPolicy Bypass -File "Sort-GameShortcuts.ps1" -Undo        (restore everything)
 #
 # A cache file (steam-studio-cache.csv) remembers studio lookups so re-runs are fast,
-# and shortcut-sort-log.csv enables -Undo.
+# and shortcut-sort-log.csv enables -Undo (moves from ALL runs are kept in the log).
 
 param(
     [switch]$WhatIf,
@@ -113,10 +117,22 @@ function Sanitize([string]$name) {
 }
 
 # ---------- PASS 1: COLLECT GAME SHORTCUTS & LOOK UP STUDIOS ----------
+# We scan BOTH the desktops AND the root of each existing Games folder.
+# Games already inside a studio subfolder stay put; games in the Games root
+# can be promoted into their studio folder on a later run.
 $items = New-Object System.Collections.Generic.List[object]
 
-foreach ($desktop in $DesktopDirs) {
-    Get-ChildItem -LiteralPath $desktop -File -ErrorAction SilentlyContinue |
+$scanDirs = New-Object System.Collections.Generic.List[object]
+foreach ($desktop in ($DesktopDirs | Select-Object -Unique)) {
+    $scanDirs.Add([pscustomobject]@{ Dir = $desktop; Kind = 'Desktop' })
+    $gamesRoot = Join-Path $desktop $GamesFolderName
+    if (Test-Path -LiteralPath $gamesRoot) {
+        $scanDirs.Add([pscustomobject]@{ Dir = $gamesRoot; Kind = 'GamesRoot' })
+    }
+}
+
+foreach ($scan in $scanDirs) {
+    Get-ChildItem -LiteralPath $scan.Dir -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -in '.url', '.lnk' } |
     ForEach-Object {
         $file = $_
@@ -141,6 +157,7 @@ foreach ($desktop in $DesktopDirs) {
             File   = $file
             AppId  = $appId
             Studio = $studio
+            Kind   = $scan.Kind   # 'Desktop' = new shortcut, 'GamesRoot' = already sorted into Games root
         })
     }
 }
@@ -148,6 +165,8 @@ foreach ($desktop in $DesktopDirs) {
 if ($items.Count -eq 0) { Write-Host "`nNo Steam game shortcuts found. Nothing to do."; exit }
 
 # ---------- PASS 2: WHICH STUDIOS GET THEIR OWN FOLDER? ----------
+# Counts include games already sitting in the Games folder, so studios that
+# reached 2+ games since the last run get their folder, and everything stays consistent.
 $studioCounts = @{}
 foreach ($i in $items) {
     if ($i.Studio) {
@@ -164,24 +183,35 @@ Write-Host "`nStudios with 2+ games (get their own folder): " $(($studioCounts.V
 # ---------- PASS 3: MOVE ----------
 $moved = New-Object System.Collections.Generic.List[object]
 
-foreach ($desktop in ($DesktopDirs | Select-Object -Unique)) {
-    $gamesRoot = Join-Path $desktop $GamesFolderName
+foreach ($scan in $scanDirs) {
+    $desktop = $scan.Dir
+    $gamesRoot = if ($scan.Kind -eq 'Desktop') { Join-Path $desktop $GamesFolderName } else { $desktop }
 
-    foreach ($i in ($items | Where-Object { $_.File.DirectoryName -eq $desktop })) {
+    foreach ($i in ($items | Where-Object { $_.File.DirectoryName -eq $scan.Dir })) {
+        # decide destination folder
         if ($i.Studio -and $i.Studio.ToLower() -in $multiGameStudios) {
             $subfolder = Sanitize $i.Studio
         } else {
             $subfolder = ''   # stays in Games root
         }
+
+        # shortcuts already in the Games root only need to move if they now belong in a studio folder
+        if ($i.Kind -eq 'GamesRoot' -and -not $subfolder) { continue }
+
         $destDir = if ($subfolder) { Join-Path $gamesRoot $subfolder } else { $gamesRoot }
         $dest = Join-Path $destDir $i.File.Name
 
+        # skip if the file is already exactly where it should be
+        if ($i.File.FullName -eq $dest) { continue }
+
+        $label = "$GamesFolderName$(if ($subfolder) { '\' + $subfolder } else { '' })"
+
         if ($WhatIf) {
-            Write-Host "[PREVIEW] $($i.File.Name)  ->  $GamesFolderName$(if ($subfolder) { '\' + $subfolder } else { '' })\"
+            Write-Host "[PREVIEW] $($i.File.Name)  ->  $label\"
         } else {
             if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
             Move-Item -LiteralPath $i.File.FullName -Destination $dest -Force
-            Write-Host "Moved: $($i.File.Name)  ->  $GamesFolderName$(if ($subfolder) { '\' + $subfolder } else { '' })\"
+            Write-Host "Moved: $($i.File.Name)  ->  $label\"
             $moved.Add([pscustomobject]@{
                 Name        = $i.File.Name
                 Studio      = $i.Studio
@@ -195,8 +225,18 @@ foreach ($desktop in ($DesktopDirs | Select-Object -Unique)) {
 
 if ($WhatIf) {
     Write-Host "`nPreview complete. Run without -WhatIf to actually move the files."
-} elseif ($moved.Count -gt 0) {
-    $moved | Export-Csv -Path $LogFile -NoTypeInformation -Encoding UTF8
+} else {
+    # APPEND to the log so -Undo can restore moves from every run, not just the latest
+    $allMoves = @()
+    if (Test-Path $LogFile) { $allMoves = @(Import-Csv $LogFile) }
+    $allMoves += $moved
+    if ($moved.Count -gt 0) {
+        $allMoves | Export-Csv -Path $LogFile -NoTypeInformation -Encoding UTF8
+    }
     Save-Cache
-    Write-Host "`nDone! $($moved.Count) game shortcut(s) sorted into '$GamesFolderName'. Log saved for -Undo."
+    if ($moved.Count -gt 0) {
+        Write-Host "`nDone! $($moved.Count) game shortcut(s) sorted into '$GamesFolderName'. Log updated for -Undo."
+    } else {
+        Write-Host "`nEverything already sorted - nothing to move."
+    }
 }
