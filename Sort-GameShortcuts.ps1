@@ -58,15 +58,35 @@ if ($Undo) {
 }
 
 # ---------- LOCATE DESKTOPS ----------
-# Includes the normal desktop, the OneDrive desktop ("Skrivebord" in Danish), and the public desktop
+# The normal desktop (Windows resolves the localized name automatically,
+# including a OneDrive-backed one when OneDrive backup is enabled), plus the public desktop.
 $DesktopDirs = @([Environment]::GetFolderPath('Desktop'))
+
+# Fallback: find desktop folders under the OneDrive root, in ANY language.
+# Two detection methods:
+#   1) The folder's desktop.ini references shell32.dll resource -21769 (the
+#      "Desktop" string/icon). This marker is identical in ALL Windows languages.
+#   2) A list of common localized folder names (Skrivebord, Schreibtisch, Bureau, ...).
 $od = [Environment]::GetEnvironmentVariable('OneDrive')
-if ($od) {
-    foreach ($name in @('Skrivebord', 'Desktop')) {
-        $p = Join-Path $od $name
-        if ((Test-Path $p) -and $DesktopDirs -notcontains $p) { $DesktopDirs += $p }
+if ($od -and (Test-Path -LiteralPath $od)) {
+    foreach ($sub in (Get-ChildItem -LiteralPath $od -Directory -ErrorAction SilentlyContinue)) {
+        $isDesktop = $false
+        $ini = Join-Path $sub.FullName 'desktop.ini'
+        if (Test-Path -LiteralPath $ini) {
+            $content = Get-Content -LiteralPath $ini -ErrorAction SilentlyContinue
+            if ($content -match '-21769') { $isDesktop = $true }   # language-independent desktop marker
+        }
+        if (-not $isDesktop) {
+            $knownNames = @('Desktop', 'Skrivebord', 'Skrivbord', 'Schreibtisch', 'Bureau',
+                            'Bureaublad', 'Escritorio', 'Pulpit', 'Plocha', 'Työpöytä',
+                            'Área de Trabalho', 'Рабочий стол', 'Asztal', 'Masaüstü',
+                            '桌面', 'デスクトップ', '바탕 화면')
+            if ($knownNames -contains $sub.Name) { $isDesktop = $true }
+        }
+        if ($isDesktop -and ($DesktopDirs -notcontains $sub.FullName)) { $DesktopDirs += $sub.FullName }
     }
 }
+
 $pub = 'C:\Users\Public\Desktop'
 if ((Test-Path $pub) -and $DesktopDirs -notcontains $pub) { $DesktopDirs += $pub }
 
